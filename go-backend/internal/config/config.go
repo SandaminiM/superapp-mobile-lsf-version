@@ -16,6 +16,8 @@ type Config struct {
 	JWKSURL     string
 	JWTIssuer   string
 	JWTAudience string
+
+	UserServiceType string
 }
 
 func Load() *Config {
@@ -30,9 +32,15 @@ func Load() *Config {
 		JWKSURL:     getEnv("JWKS_URL", "fallback <idp-metadata-url>/jwks"),
 		JWTIssuer:   getEnv("JWT_ISSUER", "fallback <idp-issuer-url>"),
 		JWTAudience: getEnv("JWT_AUDIENCE", "fallback <target-audience-in-token>"),
+
+		UserServiceType: getEnv("USER_SERVICE_TYPE", "db"),
 	}
 
-	slog.Info("Configuration loaded", "server_port", cfg.ServerPort, "db_host", cfg.DBHost)
+	slog.Info("Configuration loaded",
+		"server_port", cfg.ServerPort,
+		"db_host", cfg.DBHost,
+		"user_service_type", cfg.UserServiceType,
+	)
 	return cfg
 }
 
