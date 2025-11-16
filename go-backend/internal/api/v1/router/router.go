@@ -4,16 +4,18 @@ import (
 	"net/http"
 
 	"go-backend/internal/api/v1/handler"
+	"go-backend/internal/config"
 
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
 
 // NewV1Router returns the main http.Handler configured with chi routes.
-func NewV1Router(db *gorm.DB) http.Handler {
+func NewV1Router(db *gorm.DB, cfg *config.Config) http.Handler {
 	r := chi.NewRouter()
 
 	r.Mount("/micro-apps", microAppRoutes(db))
+	r.Mount("/tokens", tokenRoutes(cfg))
 
 	return r
 }
@@ -40,6 +42,30 @@ func microAppRoutes(db *gorm.DB) http.Handler {
 
 	// POST /micro-apps/{appID}/versions
 	r.Post("/{appID}/versions", microappVersionHandler.UpsertVersion)
+
+	return r
+}
+
+// tokenRoutes sets up a sub-router for token operations.
+func tokenRoutes(cfg *config.Config) http.Handler {
+	r := chi.NewRouter()
+
+	tokenHandler := handler.NewTokenHandler(cfg)
+
+	// POST /tokens
+	r.Post("/", tokenHandler.IssueToken)
+
+	return r
+}
+
+// WellKnownRoutes sets up a sub-router for well-known endpoints.
+func WellKnownRoutes(cfg *config.Config) http.Handler {
+	r := chi.NewRouter()
+
+	tokenHandler := handler.NewTokenHandler(cfg)
+
+	// GET /.well-known/jwks
+	r.Get("/jwks", tokenHandler.GetJWKS)
 
 	return r
 }

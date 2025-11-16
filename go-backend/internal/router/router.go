@@ -18,10 +18,13 @@ func NewRouter(db *gorm.DB, cfg *config.Config) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
+	// Well-known routes (no authentication)
+	r.Mount("/.well-known", v1.WellKnownRoutes(cfg))
+
 	// Apply Auth middleware and mount v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(auth.AuthMiddleware(cfg))
-		r.Mount("/", v1.NewV1Router(db))
+		r.Mount("/", v1.NewV1Router(db, cfg))
 	})
 
 	// future: v2 routers can be added here
