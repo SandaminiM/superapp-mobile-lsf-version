@@ -10,6 +10,19 @@ import (
 	"gorm.io/gorm"
 )
 
+// userModel represents the database table structure for users
+type userModel struct {
+	Email         string  `gorm:"column:email;type:varchar(100);primaryKey"`
+	FirstName     string  `gorm:"column:firstName;type:varchar(50)"`
+	LastName      string  `gorm:"column:lastName;type:varchar(50)"`
+	UserThumbnail *string `gorm:"column:userThumbnail;type:varchar(255)"`
+	Location      *string `gorm:"column:location;type:varchar(100)"`
+}
+
+func (userModel) TableName() string {
+	return "users_"
+}
+
 type DBUserService struct {
 	db *gorm.DB
 }
@@ -25,7 +38,7 @@ func NewDBUserService() UserService {
 
 // GetUserByEmail retrieves a user by their email address.
 func (s *DBUserService) GetUserByEmail(email string) (*models.User, error) {
-	var user models.User
+	var user userModel
 	result := s.db.Where("email = ?", email).First(&user)
 
 	if result.Error != nil {
@@ -36,12 +49,12 @@ func (s *DBUserService) GetUserByEmail(email string) (*models.User, error) {
 		return nil, result.Error
 	}
 
-	return &user, nil
+	return user.toUser(), nil
 }
 
 // GetAllUsers retrieves all users from the database.
-func (s *DBUserService) GetAllUsers() ([]models.User, error) {
-	var users []models.User
+func (s *DBUserService) GetAllUsers() ([]*models.User, error) {
+	var users []userModel
 	result := s.db.Order("firstName, lastName").Find(&users)
 
 	if result.Error != nil {
@@ -49,22 +62,29 @@ func (s *DBUserService) GetAllUsers() ([]models.User, error) {
 		return nil, result.Error
 	}
 
-	return users, nil
+	// Convert to models.User
+	modelUsers := make([]*models.User, len(users))
+	for i, u := range users {
+		modelUsers[i] = u.toUser()
+	}
+
+	return modelUsers, nil
 }
 
 // UpsertUser creates a new user or updates an existing one.
 func (s *DBUserService) UpsertUser(user *models.User) error {
+	dbUser := fromUser(user)
 	result := s.db.Where("email = ?", user.Email).
-		Assign(models.User{
+		Assign(userModel{
 			FirstName:     user.FirstName,
 			LastName:      user.LastName,
 			UserThumbnail: user.UserThumbnail,
 			Location:      user.Location,
 		}).
-		Attrs(models.User{
+		Attrs(userModel{
 			Email: user.Email,
 		}).
-		FirstOrCreate(user)
+		FirstOrCreate(dbUser)
 
 	if result.Error != nil {
 		slog.Error("Failed to upsert user", "error", result.Error, "email", user.Email)
@@ -74,15 +94,15 @@ func (s *DBUserService) UpsertUser(user *models.User) error {
 	return nil
 }
 
-// UpsertUsers creates or updates multiple users in the database within a transaction.
-func (s *DBUserService) UpsertUsers(users []models.User) error {
+// UpsertBulkUsers creates or updates multiple users in the database within a transaction.
+func (s *DBUserService) UpsertBulkUsers(users []*models.User) error {
 	slog.Info("Upserting bulk users", "count", len(users))
 
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		txService := &DBUserService{db: tx}
 
 		for i, user := range users {
-			if err := txService.UpsertUser(&user); err != nil {
+			if err := txService.UpsertUser(user); err != nil {
 				slog.Error("Failed to upsert user in bulk operation",
 					"error", err, "index", i, "email", user.Email)
 				return err
@@ -96,7 +116,7 @@ func (s *DBUserService) UpsertUsers(users []models.User) error {
 
 // DeleteUser removes a user by their email address.
 func (s *DBUserService) DeleteUser(email string) error {
-	result := s.db.Where("email = ?", email).Delete(&models.User{})
+	result := s.db.Where("email = ?", email).Delete(&userModel{})
 
 	if result.Error != nil {
 		slog.Error("Failed to delete user", "error", result.Error, "email", email)
@@ -109,4 +129,28 @@ func (s *DBUserService) DeleteUser(email string) error {
 	}
 
 	return nil
+}
+
+// Helper functions
+
+// toUser converts database model to models.User
+func (u *userModel) toUser() *models.User {
+	return &models.User{
+		Email:         u.Email,
+		FirstName:     u.FirstName,
+		LastName:      u.LastName,
+		UserThumbnail: u.UserThumbnail,
+		Location:      u.Location,
+	}
+}
+
+// fromUser converts models.User to database model
+func fromUser(u *models.User) *userModel {
+	return &userModel{
+		Email:         u.Email,
+		FirstName:     u.FirstName,
+		LastName:      u.LastName,
+		UserThumbnail: u.UserThumbnail,
+		Location:      u.Location,
+	}
 }

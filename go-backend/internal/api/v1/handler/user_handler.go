@@ -110,7 +110,7 @@ func (h *UserHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 
 	// Bulk user upsert
 	if isBulk {
-		if err := h.userService.UpsertUsers(users); err != nil {
+		if err := h.userService.UpsertBulkUsers(users); err != nil {
 			slog.Error("Failed to upsert bulk users", "error", err, "count", len(users))
 			http.Error(w, "failed to upsert bulk users", http.StatusInternalServerError)
 			return
@@ -120,7 +120,7 @@ func (h *UserHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Single user upsert
-	if err := h.userService.UpsertUser(&users[0]); err != nil {
+	if err := h.userService.UpsertUser(users[0]); err != nil {
 		slog.Error("Failed to upsert user", "error", err, "email", users[0].Email)
 		http.Error(w, "failed to upsert user", http.StatusInternalServerError)
 		return
@@ -182,15 +182,15 @@ func parseUpsertPayload(body any) ([]dto.UpsertUserRequest, bool, error) {
 }
 
 // Converts DTOs to models and validates them.
-func convertAndValidateRequests(w http.ResponseWriter, reqs []dto.UpsertUserRequest) ([]models.User, bool) {
-	users := make([]models.User, 0, len(reqs))
+func convertAndValidateRequests(w http.ResponseWriter, reqs []dto.UpsertUserRequest) ([]*models.User, bool) {
+	users := make([]*models.User, 0, len(reqs))
 
 	for _, r := range reqs {
 		if !validateStruct(w, &r) {
 			return nil, false
 		}
 
-		users = append(users, models.User{
+		users = append(users, &models.User{
 			Email:         r.Email,
 			FirstName:     r.FirstName,
 			LastName:      r.LastName,
