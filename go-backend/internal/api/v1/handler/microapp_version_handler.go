@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 
 	"go-backend/internal/api/v1/dto"
@@ -63,20 +62,6 @@ func (h *MicroAppVersionHandler) UpsertVersion(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Check authorization: user must have access to this app
-	authorizedAppIDs, err := h.getMicroAppIDsByGroups(userInfo.Groups)
-	if err != nil {
-		slog.Error("Failed to get authorized app IDs", "error", err, "groups", userInfo.Groups)
-		http.Error(w, "failed to verify authorization", http.StatusInternalServerError)
-		return
-	}
-
-	if !slices.Contains(authorizedAppIDs, appID) {
-		slog.Warn("User not authorized to create version for micro app", "appID", appID, "email", userInfo.Email, "groups", userInfo.Groups)
-		http.Error(w, "micro app not found", http.StatusNotFound)
-		return
-	}
-
 	if !validateContentType(w, r) {
 		return
 	}
@@ -97,9 +82,21 @@ func (h *MicroAppVersionHandler) UpsertVersion(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Use transaction to prevent race condition: check app exists and create version atomically
+	// Use transaction to prevent race condition: check authorization, app exists, and create version atomically
 	var version models.MicroAppVersion
-	err = h.db.Transaction(func(tx *gorm.DB) error {
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		// Check authorization within transaction to prevent race condition
+		// User could lose access between check and version creation
+		var count int64
+		if err := tx.Model(&models.MicroAppRole{}).
+			Where("micro_app_id = ? AND active = ? AND role IN ?", appID, 1, userInfo.Groups).
+			Count(&count).Error; err != nil {
+			return fmt.Errorf("failed to check authorization: %w", err)
+		}
+		if count == 0 {
+			return fmt.Errorf("unauthorized: user does not have access to app")
+		}
+
 		// Check if micro app exists within the transaction
 		// This prevents the race condition where app could be deleted between check and create
 		var microApp models.MicroApp
@@ -136,6 +133,13 @@ func (h *MicroAppVersionHandler) UpsertVersion(w http.ResponseWriter, r *http.Re
 
 	// Handle transaction errors
 	if err != nil {
+		// Check for authorization error
+		if strings.Contains(err.Error(), "unauthorized") {
+			slog.Warn("User not authorized to create version for micro app", "appID", appID, "email", userInfo.Email, "groups", userInfo.Groups)
+			http.Error(w, "micro app not found", http.StatusNotFound)
+			return
+		}
+
 		// Check for foreign key constraint violation (app was deleted during transaction)
 		if isForeignKeyError(err) {
 			http.Error(w, "micro app not found or was deleted", http.StatusNotFound)
