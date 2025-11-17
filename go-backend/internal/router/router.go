@@ -3,7 +3,8 @@ package router
 import (
 	"net/http"
 
-	v1 "go-backend/internal/api/v1/router"
+	v1 "go-backend/internal/api/v1/handler"
+	v1router "go-backend/internal/api/v1/router"
 	"go-backend/internal/auth"
 	"go-backend/internal/config"
 
@@ -18,10 +19,13 @@ func NewRouter(db *gorm.DB, cfg *config.Config) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
+	// Health check endpoint (no auth required)
+	r.Get("/health", v1.Health)
+
 	// Apply Auth middleware and mount v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(auth.AuthMiddleware(cfg))
-		r.Mount("/", v1.NewV1Router(db))
+		r.Mount("/", v1router.NewV1Router(db))
 	})
 
 	// future: v2 routers can be added here
