@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 
 	"go-backend/internal/api/v1/dto"
 	"go-backend/internal/auth"
@@ -31,15 +33,11 @@ func (h *MicroAppHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get app IDs the user has access to based on their groups
-	authorizedAppIDs, err := h.getMicroAppIDsByGroups(userInfo.Groups)
-	if err != nil {
-		slog.Error("Failed to get authorized app IDs", "error", err, "groups", userInfo.Groups)
-		http.Error(w, "failed to fetch micro apps", http.StatusInternalServerError)
-		return
-	}
-
-	if len(authorizedAppIDs) == 0 {
+	// Use JOIN query to check authorization at query time, preventing race conditions
+	// This ensures user access is checked when data is fetched, not before
+	var apps []models.MicroApp
+	if len(userInfo.Groups) == 0 {
+		// No groups - return empty result
 		if err := writeJSON(w, http.StatusOK, []dto.MicroAppResponse{}); err != nil {
 			slog.Error("Failed to write JSON response", "error", err)
 			http.Error(w, "failed to write response", http.StatusInternalServerError)
@@ -47,11 +45,11 @@ func (h *MicroAppHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var apps []models.MicroApp
-
-	// Fetch only active micro apps with their active versions, roles, and configs
-	// that the user has access to
-	if err := h.db.Where("active = ? AND micro_app_id IN ?", 1, authorizedAppIDs).
+	// Single query with JOIN to check authorization at query time
+	if err := h.db.Table("micro_app").
+		Select("DISTINCT micro_app.*").
+		Joins("INNER JOIN micro_app_role ON micro_app.micro_app_id = micro_app_role.micro_app_id").
+		Where("micro_app.active = ? AND micro_app_role.active = ? AND micro_app_role.role IN ?", 1, 1, userInfo.Groups).
 		Preload("Versions", "active = ?", 1).
 		Preload("Roles", "active = ?", 1).
 		Preload("Configs", "active = ?", 1).
@@ -105,8 +103,13 @@ func (h *MicroAppHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use single query with Preload to fix N+1 and reduce TOCTOU window
 	var app models.MicroApp
-	if err := h.db.Where("micro_app_id = ? AND active = ?", id, 1).First(&app).Error; err != nil {
+	if err := h.db.Where("micro_app_id = ? AND active = ?", id, 1).
+		Preload("Versions", "active = ?", 1).
+		Preload("Roles", "active = ?", 1).
+		Preload("Configs", "active = ?", 1).
+		First(&app).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			http.Error(w, "micro app not found", http.StatusNotFound)
 		} else {
@@ -116,12 +119,7 @@ func (h *MicroAppHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appResponse, err := h.convertToResponse(app)
-	if err != nil {
-		slog.Error("Failed to convert micro app to response", "error", err, "appID", id)
-		http.Error(w, "failed to fetch", http.StatusInternalServerError)
-		return
-	}
+	appResponse := h.convertToResponseFromPreloaded(app)
 
 	if err := writeJSON(w, http.StatusOK, appResponse); err != nil {
 		slog.Error("Failed to write JSON response", "error", err)
@@ -146,13 +144,35 @@ func (h *MicroAppHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 	limitRequestBody(w, r, 0) // 1MB default limit
 	var req dto.CreateMicroAppRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		if isMaxBytesError(err) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+		}
 		return
 	}
 
 	// Validate request
 	if !validateStruct(w, &req) {
 		return
+	}
+
+	// Check authorization: if app exists, user must have access to update it
+	// For new apps, we allow creation (they're the creator)
+	var existingApp models.MicroApp
+	if err := h.db.Where("micro_app_id = ?", req.AppID).First(&existingApp).Error; err == nil {
+		// App exists - check authorization
+		authorizedAppIDs, err := h.getMicroAppIDsByGroups(userInfo.Groups)
+		if err != nil {
+			slog.Error("Failed to get authorized app IDs", "error", err, "groups", userInfo.Groups)
+			http.Error(w, "failed to verify authorization", http.StatusInternalServerError)
+			return
+		}
+		if !slices.Contains(authorizedAppIDs, req.AppID) {
+			slog.Warn("User not authorized to update micro app", "appID", req.AppID, "email", userInfo.Email, "groups", userInfo.Groups)
+			http.Error(w, "micro app not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	var app models.MicroApp
@@ -256,12 +276,19 @@ func (h *MicroAppHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appResponse, err := h.convertToResponse(app)
-	if err != nil {
-		slog.Error("Failed to fetch versions for micro app", "error", err, "appID", req.AppID)
-		http.Error(w, "failed to fetch versions", http.StatusInternalServerError)
+	// Reload app with all relationships to ensure response reflects saved data
+	var reloadedApp models.MicroApp
+	if err := h.db.Where("micro_app_id = ?", req.AppID).
+		Preload("Versions", "active = ?", 1).
+		Preload("Roles", "active = ?", 1).
+		Preload("Configs", "active = ?", 1).
+		First(&reloadedApp).Error; err != nil {
+		slog.Error("Failed to reload micro app after upsert", "error", err, "appID", req.AppID)
+		http.Error(w, "failed to fetch app data", http.StatusInternalServerError)
 		return
 	}
+
+	appResponse := h.convertToResponseFromPreloaded(reloadedApp)
 
 	if err := writeJSON(w, http.StatusCreated, appResponse); err != nil {
 		slog.Error("Failed to write JSON response", "error", err)
@@ -277,19 +304,37 @@ func (h *MicroAppHandler) Deactivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var app models.MicroApp
-	if err := h.db.Where("micro_app_id = ?", id).First(&app).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			http.Error(w, "micro app not found", http.StatusNotFound)
-		} else {
-			slog.Error("Failed to fetch micro app", "error", err, "appID", id)
-			http.Error(w, "failed to fetch micro app", http.StatusInternalServerError)
-		}
+	// Get user info from context (set by auth middleware)
+	userInfo, ok := auth.GetUserInfo(r.Context())
+	if !ok {
+		http.Error(w, "user info not found in context", http.StatusUnauthorized)
+		return
+	}
+
+	// Check authorization: user must have access to this app
+	authorizedAppIDs, err := h.getMicroAppIDsByGroups(userInfo.Groups)
+	if err != nil {
+		slog.Error("Failed to get authorized app IDs", "error", err, "groups", userInfo.Groups)
+		http.Error(w, "failed to verify authorization", http.StatusInternalServerError)
+		return
+	}
+	if !slices.Contains(authorizedAppIDs, id) {
+		slog.Warn("User not authorized to deactivate micro app", "appID", id, "email", userInfo.Email, "groups", userInfo.Groups)
+		http.Error(w, "micro app not found", http.StatusNotFound)
 		return
 	}
 
 	// Use transaction to ensure app, versions, roles, and configs are deactivated together
-	err := h.db.Transaction(func(tx *gorm.DB) error {
+	// Fetch app inside transaction to prevent race condition
+	err = h.db.Transaction(func(tx *gorm.DB) error {
+		var app models.MicroApp
+		if err := tx.Where("micro_app_id = ?", id).First(&app).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return fmt.Errorf("micro app not found: %w", err)
+			}
+			return fmt.Errorf("failed to fetch micro app: %w", err)
+		}
+
 		if err := tx.Model(&app).Update("active", 0).Error; err != nil {
 			return err
 		}
@@ -306,8 +351,12 @@ func (h *MicroAppHandler) Deactivate(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		slog.Error("Failed to deactivate micro app", "error", err, "appID", id)
-		http.Error(w, "failed to deactivate micro app", http.StatusInternalServerError)
+		if strings.Contains(err.Error(), "micro app not found") {
+			http.Error(w, "micro app not found", http.StatusNotFound)
+		} else {
+			slog.Error("Failed to deactivate micro app", "error", err, "appID", id)
+			http.Error(w, "failed to deactivate micro app", http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -468,7 +517,12 @@ func (h *MicroAppHandler) convertToResponseFromPreloaded(app models.MicroApp) dt
 	var configResponses []dto.MicroAppConfigResponse
 	for _, c := range app.Configs {
 		// Marshal JSONMap to json.RawMessage
-		configValueBytes, _ := json.Marshal(c.ConfigValue)
+		configValueBytes, err := json.Marshal(c.ConfigValue)
+		if err != nil {
+			slog.Error("Failed to marshal config value", "error", err, "appID", app.MicroAppID, "key", c.ConfigKey)
+			// Return empty config value on error to prevent invalid JSON
+			configValueBytes = []byte("null")
+		}
 		configResponses = append(configResponses, dto.MicroAppConfigResponse{
 			ConfigKey:   c.ConfigKey,
 			ConfigValue: json.RawMessage(configValueBytes),

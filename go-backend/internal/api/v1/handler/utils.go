@@ -2,13 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-
-	"github.com/go-playground/validator/v10"
+	"strings"
 )
-
-var validate = validator.New()
 
 // Writes the given data as JSON to the HTTP response with the specified status code.
 func writeJSON(w http.ResponseWriter, status int, data any) error {
@@ -22,11 +20,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) error {
 
 // Validates a struct using the validator package and writes validation errors to the response.
 func validateStruct(w http.ResponseWriter, s any) bool {
-	if err := validate.Struct(s); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return false
-	}
-	return true
+	return validateRequest(w, s)
 }
 
 // Validates that the Content-Type header is application/json.
@@ -45,4 +39,23 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 		maxBytes = 1 << 20 // 1MB default
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+}
+
+// isMaxBytesError checks if an error is due to request body size limit being exceeded
+func isMaxBytesError(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
+// isForeignKeyError checks if an error is due to a foreign key constraint violation
+// MySQL error code 1452 indicates foreign key constraint failure
+func isForeignKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// MySQL foreign key constraint violation error code
+	return strings.Contains(errStr, "1452") ||
+		strings.Contains(errStr, "foreign key constraint") ||
+		strings.Contains(errStr, "Cannot add or update a child row")
 }
