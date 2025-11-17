@@ -146,7 +146,11 @@ func (h *MicroAppHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 	limitRequestBody(w, r, 0) // 1MB default limit
 	var req dto.CreateMicroAppRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		if isMaxBytesError(err) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -468,7 +472,12 @@ func (h *MicroAppHandler) convertToResponseFromPreloaded(app models.MicroApp) dt
 	var configResponses []dto.MicroAppConfigResponse
 	for _, c := range app.Configs {
 		// Marshal JSONMap to json.RawMessage
-		configValueBytes, _ := json.Marshal(c.ConfigValue)
+		configValueBytes, err := json.Marshal(c.ConfigValue)
+		if err != nil {
+			slog.Error("Failed to marshal config value", "error", err, "appID", app.MicroAppID, "key", c.ConfigKey)
+			// Return empty config value on error to prevent invalid JSON
+			configValueBytes = []byte("null")
+		}
 		configResponses = append(configResponses, dto.MicroAppConfigResponse{
 			ConfigKey:   c.ConfigKey,
 			ConfigValue: json.RawMessage(configValueBytes),

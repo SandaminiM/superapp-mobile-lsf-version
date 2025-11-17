@@ -2,8 +2,10 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -45,4 +47,23 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 		maxBytes = 1 << 20 // 1MB default
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+}
+
+// isMaxBytesError checks if an error is due to request body size limit being exceeded
+func isMaxBytesError(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
+// isForeignKeyError checks if an error is due to a foreign key constraint violation
+// MySQL error code 1452 indicates foreign key constraint failure
+func isForeignKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// MySQL foreign key constraint violation error code
+	return strings.Contains(errStr, "1452") ||
+		strings.Contains(errStr, "foreign key constraint") ||
+		strings.Contains(errStr, "Cannot add or update a child row")
 }
