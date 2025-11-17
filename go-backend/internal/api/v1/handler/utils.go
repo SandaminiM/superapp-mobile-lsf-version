@@ -6,11 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-
-	"github.com/go-playground/validator/v10"
 )
-
-var validate = validator.New()
 
 // Writes the given data as JSON to the HTTP response with the specified status code.
 func writeJSON(w http.ResponseWriter, status int, data any) error {
@@ -24,11 +20,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) error {
 
 // Validates a struct using the validator package and writes validation errors to the response.
 func validateStruct(w http.ResponseWriter, s any) bool {
-	if err := validate.Struct(s); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return false
-	}
-	return true
+	return validateRequest(w, s)
 }
 
 // Validates that the Content-Type header is application/json.

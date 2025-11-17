@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -23,4 +22,3 @@ func Health(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write health response", http.StatusInternalServerError)
 	}
 }
-
